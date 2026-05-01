@@ -1,0 +1,200 @@
+<!DOCTYPE HTML>
+<html>
+ <head>
+  <title>Inteligentné chladenie</title>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="https://code.jquery.com/ui/1.12.1/themes/base/jquery-ui.css">
+  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <script src="https://code.jquery.com/ui/1.12.1/jquery-ui.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+
+  <script type="text/javascript" charset="utf-8">
+    $(document).ready(function() {
+      $("#tabs").tabs();
+      var socket = io.connect('http://' + document.domain + ':' + location.port + '/test');
+      var is_running = false;
+
+      // 1. Graf pre TEPLOTU
+      var layoutTemp = {
+        title: 'Priebeh teploty senzora',
+        xaxis: { title: 'Čas (merania)' },
+        yaxis: { title: 'Teplota (°C)', range: [20,35], fixedrange: true } // Mierka sa automaticky prispôsobí teplote
+      };
+      Plotly.newPlot('live_plot_temp', [{y: [], type: 'scatter', name: 'Teplota', line: {color: 'red'}}], layoutTemp);
+
+      // 2. Graf pre VÝKON
+      var layoutPwm = {
+        title: 'Výkon akčného člena (Ventilátor)',
+        xaxis: { title: 'Čas (merania)' },
+        yaxis: { title: 'Výkon (%)', range: [0, 105] } // Výkon je vždy 0 až 100%
+      };
+      Plotly.newPlot('live_plot_pwm', [{y: [], type: 'scatter', name: 'Výkon', line: {color: 'blue', shape: 'hv'}}], layoutPwm);
+     
+      var counter = 0;
+
+      function drawGauge(canvasId, value, maxVal, title, color) {
+          var canvas = document.getElementById(canvasId);
+          var ctx = canvas.getContext("2d");
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          var angle = (value / maxVal) * Math.PI;
+          ctx.beginPath(); ctx.arc(150, 150, 100, Math.PI, 2 * Math.PI);
+          ctx.lineWidth = 20; ctx.strokeStyle = "#eee"; ctx.stroke();
+          ctx.beginPath(); ctx.arc(150, 150, 100, Math.PI, Math.PI + angle);
+          ctx.lineWidth = 20; ctx.strokeStyle = color; ctx.stroke();
+          ctx.fillStyle = "black"; ctx.font = "24px Arial"; ctx.textAlign = "center";
+          ctx.fillText(value.toFixed(1), 150, 140);
+          ctx.font = "16px Arial"; ctx.fillText(title, 150, 180);
+      }
+
+      socket.on('my_response', function(msg) {
+          $('#log').prepend('<p>Teplota: ' + msg.temp.toFixed(1) + ' °C | RPM: ' + msg.rpm + ' | Výkon: ' + msg.pwm + ' %</p>');
+         
+          // Zápis do dvoch SAMOSTATNÝCH grafov
+          Plotly.extendTraces('live_plot_temp', {y: [[msg.temp]]}, [0]);
+          Plotly.extendTraces('live_plot_pwm', {y: [[msg.pwm]]}, [0]);
+          counter++;
+         
+          if(counter > 60) {
+              Plotly.relayout('live_plot_temp', {xaxis: {range: [counter-60, counter]}});
+              Plotly.relayout('live_plot_pwm', {xaxis: {range: [counter-60, counter]}});
+          }
+
+          drawGauge('canvasTemp', msg.temp, 50, "Teplota (°C)", "red");
+          drawGauge('canvasPwm', msg.pwm, 100, "Výkon (%)", "blue");
+      });
+
+      $('#btn_open').click(function() { socket.emit('open'); });
+      $('#btn_close').click(function() { socket.emit('close'); });
+
+      $('#btn_set').click(function() {
+          socket.emit('set_params', {
+              setpoint: $('#setpoint_in').val(),
+              kp: $('#kp_in').val()
+          });
+          alert("Parametre uložené do riadiacej jednotky.");
+      });
+
+      $('#start_stop_btn').click(function() {
+          is_running = !is_running;
+          if (is_running) {
+              $(this).val('Stop (Ukončiť reguláciu)');
+              $(this).css('background-color', 'salmon');
+              $('#log').empty();
+              // Vyčistenie grafov pri novom štarte
+              Plotly.deleteTraces('live_plot_temp', [0]);
+              Plotly.addTraces('live_plot_temp', [{y: [], name: 'Teplota', line: {color: 'red'}}]);
+              Plotly.deleteTraces('live_plot_pwm', [0]);
+              Plotly.addTraces('live_plot_pwm', [{y: [], name: 'Výkon', line: {color: 'blue', shape: 'hv'}}]);
+              counter = 0;
+          } else {
+              $(this).val('Start (Spustiť reguláciu)');
+              $(this).css('background-color', 'lightgreen');
+          }
+          socket.emit('toggle_state', {state: is_running});
+      });
+     
+      // Kód pre DB a Súbory zostáva nezmenený, len použijeme jeden plot
+      $('#db_form').submit(function(e) {
+          e.preventDefault();
+          $.get('/read_db/' + $('#db_id').val(), function(data) {
+              parseAndPlotHistory(data, 'db_plot', 'db_log');
+          });
+      });
+
+      $('#file_form').submit(function(e) {
+          e.preventDefault();
+          $.get('/read_file/' + $('#file_id').val(), function(data) {
+              parseAndPlotHistory(data, 'file_plot', 'file_log');
+          });
+      });
+
+      function parseAndPlotHistory(jsonData, plotId, logId) {
+          var arr = JSON.parse(jsonData);
+          var temp_arr = [], pwm_arr = [], html_log = "";
+          for(var i=0; i<arr.length; i++) {
+              temp_arr.push(arr[i].temp);
+              pwm_arr.push(arr[i].pwm);
+              html_log += "T: " + arr[i].temp + "°C, P: " + arr[i].pwm + "%<br>";
+          }
+          $('#'+logId).html(html_log);
+          // Pre historické dáta použijeme dve osi Y v jednom grafe
+          var t1 = {y: temp_arr, name: 'Teplota', type: 'scatter'};
+          var t2 = {y: pwm_arr, name: 'Výkon', type: 'scatter', yaxis: 'y2'};
+          var layout = {
+              title: 'Archivovaný priebeh',
+              yaxis: {title: 'Teplota (°C)', titlefont: {color: 'red'}, tickfont: {color: 'red'}},
+              yaxis2: {title: 'Výkon (%)', titlefont: {color: 'blue'}, tickfont: {color: 'blue'}, overlaying: 'y', side: 'right'}
+          };
+          Plotly.newPlot(plotId, [t1, t2], layout);
+      }
+    });
+  </script>
+ </head>
+ <body>
+  <h1 style="text-align: center;">Systém pre riadenie a vizualizáciu chladenia</h1>
+ 
+  <div id="tabs">
+    <ul>
+      <li><a href="#tab-1">1. Ovládanie a Záznam</a></li>
+      <li><a href="#tab-2">2. Live Grafy</a></li>
+      <li><a href="#tab-3">3. Ciferníky</a></li>
+      <li><a href="#tab-4">4. Archív - Databáza</a></li>
+      <li><a href="#tab-5">5. Archív - Súbor</a></li>
+    </ul>
+
+    <div id="tab-1">
+      <h3>Hardvér</h3>
+      <button id="btn_open">Open (Pripojiť monitorovanie)</button>
+      <button id="btn_close">Close (Odpojiť)</button>
+      <hr>
+      <h3>Parametre regulátora</h3>
+      Žiadaná teplota (°C): <input type="number" id="setpoint_in" value="26.0" step="0.5">
+      Konštanta Kp: <input type="number" id="kp_in" value="50.0" step="1.0">
+      <button id="btn_set">Nastaviť parametre</button>
+      <hr>
+      <h3>Regulačný proces</h3>
+      <input type="button" id="start_stop_btn" value="Start (Spustiť reguláciu)" style="font-size:20px; padding:10px; background-color:lightgreen;">
+      <h4>Monitorované údaje (Zoznam):</h4>
+      <div id="log" style="height: 250px; overflow-y: scroll; border: 1px solid gray; padding: 10px;"></div>
+    </div>
+
+    <div id="tab-2">
+      <div id="live_plot_temp" style="width:100%; height:350px;"></div>
+      <div id="live_plot_pwm" style="width:100%; height:250px;"></div>
+    </div>
+
+    <!-- Zvyšok tabov je identický -->
+    <div id="tab-3">
+      <h2>Analógové ukazovatele</h2>
+      <div style="display: flex; justify-content: center; gap: 50px;">
+          <canvas id="canvasTemp" width="300" height="200"></canvas>
+          <canvas id="canvasPwm" width="300" height="200"></canvas>
+      </div>
+    </div>
+
+    <div id="tab-4">
+      <h2>Načítanie z databázy MySQL/SQLite</h2>
+      <form id="db_form">
+          ID záznamu: <input type="number" id="db_id" value="1" required>
+          <input type="submit" value="Načítať">
+      </form>
+      <div id="db_plot" style="width:100%; height:400px; margin-top:20px;"></div>
+      <h4>Numerický výpis DB:</h4>
+      <div id="db_log" style="height: 150px; overflow-y: scroll; border: 1px solid gray;"></div>
+    </div>
+
+    <div id="tab-5">
+      <h2>Načítanie z Textového súboru</h2>
+      <form id="file_form">
+          Číslo riadku: <input type="number" id="file_id" value="1" required>
+          <input type="submit" value="Načítať">
+      </form>
+      <div id="file_plot" style="width:100%; height:400px; margin-top:20px;"></div>
+      <h4>Numerický výpis Súbor:</h4>
+      <div id="file_log" style="height: 150px; overflow-y: scroll; border: 1px solid gray;"></div>
+    </div>
+
+  </div>
+ </body>
+</html>
