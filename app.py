@@ -32,7 +32,7 @@ is_running = False
 ser = None
 
 # Regulačné parametre (predvolené)
-SETPOINT = 26.0
+SETPOINT = 20.0
 Kp = 50.0
 data_log = []
 
@@ -45,7 +45,7 @@ def background_thread():
                 line = ser.readline().decode('utf-8').strip()
                 if "," in line:
                     parts = line.split(",")
-                    temp = float(parts[0])
+                    temp = float(parts[0])-5.0
                     rpm = int(parts[1])
                    
                     pwm_out = 0
